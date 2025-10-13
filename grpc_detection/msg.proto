@@ -1,0 +1,41 @@
+// proto生成py文件
+// python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. msg.proto
+
+// 导入string包
+
+syntax = "proto3";   // 指定protobuf版本
+
+package ShipRoi_grpc;   // 此文件的标识符,不添加也可以,以防止协议消息类型之间的名称冲突
+
+// 定义消息结构类型，数据后面的编号不能重复，request为数据结构名，可自由定义
+message request_bytes {
+	string mode = 1; // 采用哪个模型
+	bytes  image = 2; // 图片数据
+	repeated int64 image_shape = 3; // 图片尺寸
+	double confidence = 4; // 置信度
+}
+
+message request_path {
+	int32 mode = 1; // 采用哪个模型
+	string  image = 2; // 图片路径
+	double confidence = 3; // 置信度
+}
+
+// 定义消息结构类型，数据后面的编号不能重复，response为数据结构名，可自由定义
+message actionresponse {
+	repeated DATA data = 1;
+}
+
+message DATA {
+	repeated int32 ROI = 1; // ROI（List）
+	string type = 2;
+	double confidence = 3; // 置信度
+}
+
+//定义服务，下面定义的这种为最简单的rpc服务，客户端发起请求，服务端返回结果
+service FormatData {
+	rpc get_roi_from_bytes (request_bytes) returns (actionresponse) {}
+	rpc get_roi_from_path (request_path) returns (actionresponse) {}
+}
+
+

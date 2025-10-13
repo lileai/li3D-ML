@@ -1,0 +1,34 @@
+{
+  "parser_dict": {
+    "func_mode": "bank",
+    "x_min": -100.0,
+    "x_max": 100.0,
+    "voxel_size": 0.1,
+    "points_thresh": 1500,
+    "density_thresh": 20,
+    "save_ratio": 4.0,
+    "filter_thresh": 2000,
+    "nb_neighbors": 0.8,
+    "std_ratio": 0.2,
+    "divide_thresh": 100,
+    "axis_offset": 0.0,
+    "x_ratio": 1,
+    "nums": 1
+  },
+  "description": {
+    "func_mode": "[bridge, bank]桥基模式和岸基模式",
+    "x_min": "船中心的最小计算范围，桥基模式下是一个正值，岸基模式下是一个负值",
+    "x_max": "船中心的最大计算范围",
+    "voxel_size": "体素化的网格尺寸",
+    "points_thresh": "半船点的最小点数",
+    "density_thresh": "半船点的最小体密度",
+    "save_ratio": "边缘点保存的比例，越小边缘点的范围越小",
+    "filter_thresh": "船中点云需要滤波的最小点数",
+    "nb_neighbors": "滤波邻域点个数",
+    "std_ratio": "滤波标准差",
+    "divide_thresh": "分段计算的最小单元",
+    "axis_offset": "坐标轴偏移距离",
+    "x_ratio": "分段干舷法x_ratio的缩放比例系数",
+    "nums": "干舷候选点倍率"
+  }
+}

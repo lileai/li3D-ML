@@ -1,0 +1,32 @@
+# 忽略所有 .pcd 文件
+*.pcd
+
+# 忽略所有 .xlsx 文件
+*.xlsx
+
+# 忽略 scripts 目录下的 table 和 test 目录
+scripts/table/
+scripts/test/
+
+# 忽略 .vscode 目录
+.vscode/
+
+# 忽略 .idea 目录
+.idea/
+
+# 忽略 .git 目录
+.git/
+
+# Data / Cache / Logs
+data/*
+!data/.gitkeep           # 如果想保留空 data 目录
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tmp
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db

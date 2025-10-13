@@ -1,0 +1,108 @@
+# This file is covered by the LICENSE file in the root of this project.
+name: "kitti"
+labels:
+  0: "Background"
+  1: "Engineering"
+  2: "Car"
+  3: "Construction"
+  4: "Barrier"
+  5: "Grass"
+  6: "Mound"
+  7: "Opeating mechanism"
+  8: "Person"
+  9: "Ground"
+
+color_map:
+  0: [100, 100, 109] #  [0, 0, 0]
+  1: [120, 188, 255]
+  2: [248, 254, 97]
+  3: [255, 0, 112]
+  4: [255, 122, 89]
+  5: [122, 255, 141]
+  6: [143, 255, 255]
+  7: [137, 111, 255]
+  8: [3, 55, 68]
+  9: [255, 97, 212]
+
+content:
+  0: 0.0015725716913088847
+  1: 0.05349281452754723
+  2: 0.0007457761585556399
+  3: 0.1844188583325317
+  4: 0.2742300534128361
+  5: 0.08734756838511495
+  6: 0.26097058522379746
+  7: 0.03804926217754859
+  8: 0.0035034917189411163
+  9: 0.09566901837181838
+
+# classes that are indistinguishable from single scan or inconsistent in
+# ground truth are mapped to their closest equivalent
+learning_map:
+  0: 0 # "Background"
+  1: taipu_main_side # "Engineering"
+  2: 2 # "Car"
+  3: 3 # "Construction"
+  4: 4 # "Barrier"
+  5: 5 # "Grass"
+  6: 6 # "Mound"
+  7: 7 # "Opeating mechanism"
+  8: 8 # "Person"
+  9: 9 # "Ground"
+
+learning_map_inv: # inverse of previous map
+  0: 0 # "Background"
+  1: taipu_main_side # "Engineering"
+  2: 2 # "Car"
+  3: 3 # "Construction"
+  4: 4 # "Barrier"
+  5: 5 # "Grass"
+  6: 6 # "Mound"
+  7: 7 # "Opeating mechanism"
+  8: 8 # "Person"
+  9: 9 # "Ground"
+learning_ignore: # Ignore classes
+  0: True      # "Background"
+  1: False     # "Engineering"
+  2: False     # "Car"
+  3: False     # "Construction"
+  4: False     # "Barrier"
+  5: False     # "Grass"
+  6: False     # "Mound"
+  7: False     # "Opeating mechanism"
+  8: False     # "Person"
+  9: False     # "Ground"
+
+split: # sequence numbers
+  train:
+    - 0
+    - taipu_main_side
+  valid:
+    - 2
+  test:
+    - 3
+
+
+mapped_class_name:
+  0: "Background"
+  1: "Engineering"
+  2: "Car"
+  3: "Construction"
+  4: "Barrier"
+  5: "Grass"
+  6: "Mound"
+  7: "Opeating mechanism"
+  8: "Person"
+  9: "Ground"
+
+color_map_inv:
+  0: [ 100, 100, 109 ]
+  1: [ 120, 188, 255 ]
+  2: [ 248, 254, 97 ]
+  3: [ 255, 0, 112 ]
+  4: [ 255, 122, 89 ]
+  5: [ 122, 255, 141 ]
+  6: [ 143, 255, 255 ]
+  7: [ 137, 111, 255 ]
+  8: [ 3, 55, 68 ]
+  9: [ 255, 97, 212 ]
