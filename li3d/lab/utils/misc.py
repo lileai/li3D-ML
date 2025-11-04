@@ -178,6 +178,42 @@ def quat_to_matrix(q):
 
     return R
 
+def matrix_to_quat(R):
+    """
+    旋转矩阵 -> 单位四元数  [B,3,3] -> [B,4]  (x,y,z,w)
+    """
+    batch = R.size(0)
+    diag = torch.diagonal(R, dim1=-2, dim2=-1)   # [B, 3]
+    tr = diag.sum(-1)                            # [B]
+    t = tr + 1
+    q = torch.empty(batch, 4, device=R.device, dtype=R.dtype)
+
+    # 1. 主分支
+    mask = t > 1e-6
+    b_main = torch.where(mask)[0]          # 长索引
+    q_main = torch.empty(len(b_main), 4, device=R.device, dtype=R.dtype)
+    q_main[:, 3] = 0.5 * torch.sqrt(t[b_main])
+    q_main[:, 0] = (R[b_main, 2, 1] - R[b_main, 1, 2]) / (4 * q_main[:, 3])
+    q_main[:, 1] = (R[b_main, 0, 2] - R[b_main, 2, 0]) / (4 * q_main[:, 3])
+    q_main[:, 2] = (R[b_main, 1, 0] - R[b_main, 0, 1]) / (4 * q_main[:, 3])
+    q[b_main] = q_main
+
+    # 2. 辅助分支
+    b_aux = torch.where(~mask)[0]
+    if len(b_aux) > 0:
+        i = torch.argmax(diag[b_aux], dim=1)          # 在子集里找最大
+        j = (i + 1) % 3
+        k = (i + 2) % 3
+        val = torch.sqrt(diag[b_aux, i] - diag[b_aux, j] - diag[b_aux, k] + 1.0)
+        q_aux = torch.empty(len(b_aux), 4, device=R.device, dtype=R.dtype)
+        q_aux[range(len(b_aux)), i] = 0.5 * val
+        q_aux[range(len(b_aux)), 3] = (R[b_aux, k, j] - R[b_aux, j, k]) / (4 * val)
+        q_aux[range(len(b_aux)), j] = (R[b_aux, j, i] + R[b_aux, i, j]) / (4 * val)
+        q_aux[range(len(b_aux)), k] = (R[b_aux, k, i] + R[b_aux, i, k]) / (4 * val)
+        q[b_aux] = q_aux
+
+    return torch.nn.functional.normalize(q, dim=-1)
+
 
 class DummyClass:
     def __init__(self):

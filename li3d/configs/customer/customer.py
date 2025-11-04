@@ -7,17 +7,55 @@ num_worker = 16
 batch_size_val = 1
 empty_cache = False
 enable_amp = False
-show_memory = True
+show_memory = False
 
 # model
 model = dict(
     type="DefaultRegistration",
     backbone=dict(
-        type="MyModel"
+        type="SPC-FPN",
+        in_channel=4,
+        out_channel=128,
+        base_ch=32,
+    ),
+    head=dict(
+        type="GEO-HEAD",
+        blocks=["self", "cross", "self", "cross", "self", "cross"],
+        channels=128,
+        n_head=4,
+        mlp_ratio=4,
+        attn_drop=0.1,
+        proj_drop=0.1,
+        act_layer=None,
+        return_scores=False,
+        parallel=False,
+        num_correspondences=False,
+        dual_normalization=False,
+        patch_size=26,  # 一个体素块的最小邻居个数
+        voxel_size=0.2,
+        num_iterations=100,
+        topk=None,
+        acceptance_radius=None,
+        mutual=True,
+        confidence_threshold=0.05,
+        use_dustbin=False,
+        use_global_score=False,
+        correspondence_threshold=3,
+        correspondence_limit=None,
+        num_refinement_steps=5
     ),
     criteria=[
-        dict(type="PoseLoss", w_trans=1.0, w_rot=1.0, reduction="mean", loss_weight=1.0),
-        # dict(type="ReconstructionMSE", loss_weight=1.0, reduction='mean'),
+        dict(type="CoarseMatchingLoss",
+             positive_margin=0.1,
+             negative_margin=1.4,
+             positive_optimal=0.1,
+             negative_optimal=1.4,
+             log_scale=24,
+             positive_overlap=0.1,
+             weight_coarse_loss=1.0),
+        dict(type="FineMatchingLoss",
+             positive_radius=0.05,
+             weight_fine_loss=1.0),
     ],
 )
 
@@ -57,7 +95,7 @@ data = dict(
             dict(type="RandomJitter", sigma=0.005, clip=0.02, label_key="transform_matrix"),
             dict(
                 type="GridSample",
-                grid_size=0.2,
+                grid_size=0.05,
                 hash_type="fnv",
                 mode="train",
                 return_grid_coord=True,
@@ -67,7 +105,7 @@ data = dict(
             ),
             dict(
                 type="GridSample",
-                grid_size=0.2,
+                grid_size=0.05,
                 hash_type="fnv",
                 mode="train",
                 return_grid_coord=True,
@@ -97,18 +135,30 @@ data = dict(
         transform=[
             dict(
                 type="GridSample",
-                grid_size=0.2,
+                grid_size=0.05,
+                hash_type="fnv",
+                mode="train",
+                return_grid_coord=True,
+                input_key="coord",
+                grid_coord_key="grid_coord",
+                index_valid_keys_key="index_valid_keys"
+            ),
+            dict(
+                type="GridSample",
+                grid_size=0.05,
                 hash_type="fnv",
                 mode="train",
                 return_grid_coord=True,
                 input_key="coord_transformed",
-                grid_coord_key="grid_coord_transformed"
+                grid_coord_key="grid_coord_transformed",
+                index_valid_keys_key="index_valid_keys_trans"
             ),
             dict(type="ToTensor"),
             dict(
                 type="Collect",
                 # 下面这些都会保留并转 Tensor（不拼）
                 keys=("coord", "grid_coord", "coord_transformed", "grid_coord_transformed", "transform_matrix"),
+                offset_keys_dict={"offset": "coord", "offset_trans": "coord_transformed"},
                 # 下面两行 = 拼成两个 (N,4) tensor
                 orig_keys=("coord", "intensity"),  # → data["orig"] (N,4)
                 trans_keys=("coord_transformed", "intensity_transformed"),  # → data["trans"] (N,4)
@@ -159,7 +209,11 @@ hooks = [
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=2),
     dict(type="InformationWriter"),
-    dict(type="SemSegEvaluator"),
+    dict(type="PointCloudRegistrationEvaluator",
+         acceptance_overlap=0.0,
+        acceptance_radius=0.1,
+        acceptance_rre=15.0,
+        acceptance_rte=0.3),
     dict(type="CheckpointSaver", save_freq=None),
     dict(type="PreciseEvaluator", test_last=True),
 ]

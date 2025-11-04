@@ -154,9 +154,9 @@ def merge_point_clouds(output_dir):
 # 示例调用
 if __name__ == "__main__":
     data_path = r"../../data"
-    dataset = r"Huaian"
-    input_directory = rf'{data_path}/{dataset}/17_10_05_25_967047e4-579d-4720-b1ac-d50ab64ca675_7'  # 替换为你的输入目录路径
-    json_path = r'../json_files/lidar_config_huaian.json'  # 替换为你的输入json文件的路径
-    output_directory = rf'{data_path}/{dataset}/17_10_05_25_967047e4-579d-4720-b1ac-d50ab64ca675_7'  # 替换为你的输出目录路径
+    dataset = r"JaXing\D\04_12_04_50_6a5fe126-a722-4f78-bff0-037402311c03_7\recurrent_dir"
+    input_directory = rf'{data_path}/{dataset}/original_npy'  # 替换为你的输入目录路径
+    json_path = r'../json_files/lidar_config_jiaxing.json'  # 替换为你的输入json文件的路径
+    output_directory = rf'{data_path}/{dataset}/original_npy'  # 替换为你的输出目录路径
     T = load_extrinsic(json_path)
     process_directory(input_directory, output_directory, func=npy2pcd, T=T)

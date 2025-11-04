@@ -10,6 +10,8 @@ import json
 import argparse
 from scipy.optimize import least_squares
 
+from scripts.calib.camera_intrinsic.undistort_camera import load_intrinsic
+
 PANEL_H = 0  # 顶部信息面板高度
 STEP_MAP = {'k1': 0, 'k2': 1, 'k3': 4, 'p1': 2, 'p2': 3}
 
@@ -26,7 +28,6 @@ new_w = new_h = 0
 
 def push_state():
     history.append((K.copy(), dist.copy()))
-
 
 def pop_state():
     global K, dist
@@ -135,11 +136,13 @@ def auto_calc():
 
 def main():
     global img_orig, K, dist, history, pts_horizon, step, mapx, mapy, new_K
-    data_dir = "../../../data/calib/camera_intrinsic/data"
+    data_dir = "../../../data/calib/camera_intrinsic/data/jiaxing_complete"
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--img",
-                        default=r"D:\program\li3D-ML\scripts\calib\camera_intrinsic\data\suqian_thermal\10.23.221.151_02_20251013012729872.jpeg")
-    parser.add_argument("-o", "--out", default=fr"{data_dir}/suqian_thermal/intrinsic.json")
+                        default=r"D:\program\li3D-ML\data\calib\camera_intrinsic\data\jiaxing_complete\frame_0.jpg")
+    parser.add_argument("--intrinsic", default=fr"{data_dir}/intrinsic.json")
+    # parser.add_argument("--intrinsic", default=None)
+    parser.add_argument("-o", "--out", default=fr"{data_dir}/intrinsic.json")
     args = parser.parse_args()
 
     img_orig = cv2.imread(args.img)
@@ -148,8 +151,11 @@ def main():
     h, w = img_orig.shape[:2]
 
     f0 = max(w, h) * 0.8
-    K = np.array([[f0, 0, w / 2], [0, f0, h / 2], [0, 0, 1]], dtype=float)
-    dist = np.zeros(5)
+    if args.intrinsic is not None:
+        K, dist, h, w = load_intrinsic(args.intrinsic)
+    else:
+        K = np.array([[f0, 0, w / 2], [0, f0, h / 2], [0, 0, 1]], dtype=float)
+        dist = np.zeros(5)
     push_state()
     build_remap()
 
@@ -236,24 +242,22 @@ def main():
         # 焦距调节
         elif k == ord('y'):
             K[0, 0] += step * 50
-            K[1, 1] += step * 50
             push_state()
             build_remap()
         elif k == ord('h'):
             K[0, 0] -= step * 50
-            K[1, 1] -= step * 50
-            if K[0, 0] < 50:
-                K[0, 0] = K[1, 1] = 50
-            push_state()
-            build_remap()
-        elif k == ord('Y') - 32:  # Shift+y -> 单调 fx
-            K[0, 0] += step * 50
-            push_state()
-            build_remap()
-        elif k == ord('H') - 32:  # Shift+h -> 单调 fx
-            K[0, 0] -= step * 50
             if K[0, 0] < 50:
                 K[0, 0] = 50
+            push_state()
+            build_remap()
+        elif k == ord('u'):  # Shift+y -> 单调 fx
+            K[1, 1] += step * 50
+            push_state()
+            build_remap()
+        elif k == ord('j'):  # Shift+h -> 单调 fx
+            K[1, 1] -= step * 50
+            if K[1, 1] < 50:
+                K[1, 1] = 50
             push_state()
             build_remap()
 

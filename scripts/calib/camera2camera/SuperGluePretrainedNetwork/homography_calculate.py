@@ -159,10 +159,10 @@ def color_box_only_blend(rgb1, rgb2, H_list, boxs, area=None, vis_h=360,
         x_min, y_min = np.min(pts, axis=0)
         x_max, y_max = np.max(pts, axis=0)
         x_min, y_min, x_max, y_max = map(int, [x_min, y_min, x_max, y_max])
-        thick = max(1, int((y_max - y_min) / 100))
+
         # 画框
-        cv2.rectangle(rgb2_with_box, (x_min, y_min), (x_max, y_max), color, thick)
-        cv2.polylines(rgb2_with_box, [pts_int], True, (0, 255, 125), thick)
+        cv2.rectangle(rgb2_with_box, (x_min, y_min), (x_max, y_max), color, thickness)
+        # cv2.polylines(rgb2_with_box, [pts_int], True, color, thickness)
         box_h = int(pts_int[:, 1].max() - pts_int[:, 1].min())
         font_scale = np.clip(box_h / 60.0, 0.3, 1.0)
         xs, ys = pts_int[:, 0], pts_int[:, 1]
@@ -236,7 +236,7 @@ def load_intrinsic(json_path):
     with open(json_path, 'r') as f:
         cfg = json.load(f)
     K = np.array(cfg['K'], dtype=np.float64)
-    D = np.array(cfg['dist'], dtype=np.float64)   # 5 系数
+    D = np.array(cfg['dist'][0], dtype=np.float64)   # 5 系数
     h = int(cfg['img_size'][1])        # 高
     w = int(cfg['img_size'][0])        # 宽
     return K, D, h, w
@@ -252,7 +252,7 @@ def load_stable_H(path):
         # 单个文件：直接返回 H
         with open(path, 'r') as f:
             cfg = json.load(f)
-        return [np.array(cfg['H'], dtype=np.float64)]
+        return np.array(cfg['H'], dtype=np.float64)
 
     elif os.path.isdir(path):
         # 文件夹：读取所有 json 文件，返回 H 列表
@@ -332,17 +332,18 @@ if __name__ == '__main__':
     # 新增模式选择
     parser.add_argument('--mode', choices=['calib', 'show'], default='show',
                         help='calib: 三拼[rgb1|overlay|rgb2]并在线计算H; '
-                             'show: 双拼[rgb1|rgb2]直接加载H'
-                        '模式相关的配置在参数配置的最后，这里只是给声明')
+                             'show: 双拼[rgb1|rgb2]直接加载H')
     parser.add_argument('--log_level', type=str, default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
-    parser.add_argument('--input1', type=str, default=r"./video/suqian/quanmao-night/cam1.mp4")
-    parser.add_argument('--input2', type=str, default=r"./video/suqian/quanmao-night/cam2.mp4")
-    parser.add_argument('--intrinsic1_dir', type=str, default=r"D:\program\SuperGluePretrainedNetwork\camera_intrinsic\data\suqian_thermal\intrinsic.json")
-    parser.add_argument('--intrinsic2_dir', type=str,default=None, help="云台标定时不进行畸变矫正")
+    parser.add_argument('--input1', type=str, default=r"D:\program\li3D-ML\data\Qiaolin\thermal\thermal\1_to_2.mp4")
+    parser.add_argument('--input2', type=str, default=r"D:\program\li3D-ML\data\Qiaolin\thermal\transform_1_to_2\1_to_2.mp4")
+    parser.add_argument('--intrinsic1_dir', type=str,
+                        default=r"D:\program\li3D-ML\scripts\calib\camera_intrinsic\data\qiaolin_thermal\intrinsic.json")
+    parser.add_argument('--intrinsic2_dir', type=str,
+                        default=None)
     parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--output_video', type=str, default=r"./video/1.avi")
     parser.add_argument('--best_h_json', type=str, default=None, help="支持输入矩阵的文件夹或者单独的文件路径")
-    parser.add_argument('--skip', type=int, default=1)
+    parser.add_argument('--skip', type=int, default=5)
     parser.add_argument('--max_length', type=int, default=1000000)
     parser.add_argument('--resize', type=int, nargs='+', default=[640, 480])
     parser.add_argument('--superglue', choices={'indoor', 'outdoor'}, default='outdoor')
@@ -363,14 +364,15 @@ if __name__ == '__main__':
     # 先解析 mode，再覆盖默认值
     args, _ = parser.parse_known_args()
     if args.mode == 'calib':
-        parser.set_defaults(net=True, skip=1, nms_radius=10, win_len=500, boundaries=None, waitkey=0,
+        parser.set_defaults(net=True, skip=1, nms_radius=10, win_len=100, boundaries=None, waitkey=0,
                             output_video='./video/calib.avi',
-                            best_h_json='./json_file/suqian/夜间-全貌/final_stable_homography.json'),
+                            best_h_json='./json_file/thermal_distort/final_stable_homography_2.json'),
     else:
-        parser.set_defaults(net=False, nms_radius=10, win_len=100, boundaries=None, waitkey=1,
+        # 桥林云台+星光枪分区[500, 1280]
+        # 热成像分区[190, 384]
+        parser.set_defaults(net=False, nms_radius=10, win_len=100, boundaries=[190, 384], waitkey=1,
                             output_video='./video/show.avi',
-                            resize=[-1],
-                            best_h_json='./json_file/suqian/夜间-全貌/final_stable_homography.json')
+                            best_h_json='./json_file/thermal_distort')
     opt = parser.parse_args()
 
     setup_logger(opt.log_level)
@@ -417,6 +419,8 @@ if __name__ == '__main__':
     while True:
         frame_num += 1
         area = 1
+        if frame_num >= 518:
+            area = 2
         frame1, frame1_rgb, ret1 = vs1.next_frame()
         frame2, frame2_rgb, ret2 = vs2.next_frame()
         w_new1, h_new1 = process_resize(frame1.shape[1], frame1.shape[0], opt.resize)
@@ -486,8 +490,6 @@ if __name__ == '__main__':
             vis = make_vis_dual_mode(frame1_rgb, frame2_rgb, H_stable, boxs, area=area, vis_h=opt.vis_h,
                                      boundaries=opt.boundaries, mode=opt.mode)
         else:
-            mkpts0 = kpts0[valid]
-            mkpts1 = kpts1[matches[valid]]
             confidence = pred['matching_scores0'][0].cpu().numpy()
             color = cm.jet(confidence[valid])
             text = [

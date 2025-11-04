@@ -17,13 +17,13 @@ def load_extrinsic(path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pcd", default=r"D:\program\li3D-ML\scripts\calib\lidar2camera\data\qingshan\rename_2025_05_29_10_08_44_524.pcd", help="点云文件 .pcd")
-    parser.add_argument("--extr", default=r"D:\program\li3D-ML\scripts\calib\lidar2camera\data\qingshan\calibration_out.json", help="外参 4×4 JSON")
+    parser.add_argument("--pcd", default=r"D:\program\li3D-ML\data\calib\lidar2camera\data\jingzhou\1761020404.0386152_MERGE.pcd", help="点云文件 .pcd")
+    parser.add_argument("--extr", default=r"D:\program\li3D-ML\data\calib\lidar2camera\data\jingzhou\calibration_out.json", help="外参 4×4 JSON")
     args = parser.parse_args()
 
     # 1. 读取点云
-    pcd = o3d.io.read_point_cloud(args.pcd)
-    print(f"Loaded {len(pcd.points)} points")
+    pcd = o3d.t.io.read_point_cloud(args.pcd)
+    print(f"Loaded {len(pcd.point['positions'])} points")
 
     # 2. 读取外参
     T_ext = load_extrinsic(args.extr)          # 4×4

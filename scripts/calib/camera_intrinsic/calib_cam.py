@@ -16,9 +16,10 @@ from sklearn.model_selection import ShuffleSplit
 
 # -------------------- 参数解析 --------------------
 def parse_args():
-    data_path = r"../../../data/calib/camera_intrinsic/data"
+    data_path = r"../../../data/calib/camera_intrinsic/data/jiaxing_capture"
     parser = argparse.ArgumentParser()
-    parser.add_argument('--img_dir', default=rf"{data_path}/data/dahua_qiuji", type=str, help="标定图像文件夹")
+    parser.add_argument('--img_dir', default=data_path, type=str, help="标定图像文件夹")
+    parser.add_argument('--out_dir', default=rf"{data_path}/output", help="输出的路径")
     parser.add_argument('--w', default=12, type=int, help="标定板横向角点数")
     parser.add_argument('--h', default=10, type=int, help="标定板纵向角点数")
     parser.add_argument('--square_size', default=52, type=float, help="方格边长(mm)")
@@ -115,7 +116,7 @@ def calibrate(selected, objpoints, imgpoints, img_size, square_size, args):
     new_obj = [o * square_size for o in objpoints]
     ret, K, D, rvecs, tvecs = cv2.calibrateCamera(
         new_obj, imgpoints, img_size, None, None,
-        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-10))
+        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 500, 1e-10))
     mean_error = compute_reprojection_errors(new_obj, imgpoints, rvecs, tvecs, K, D)
     print(f"初始平均重投影误差（MAE）: {mean_error.mean():.4f} 像素")
     if len(selected) > args.min_images:
@@ -126,7 +127,7 @@ def calibrate(selected, objpoints, imgpoints, img_size, square_size, args):
             print(f"重新标定，使用 {len(filtered_indices)} 张高质量图像")
             ret, K, D, rvecs, tvecs = cv2.calibrateCamera(
                 objpoints, imgpoints, img_size, None, None,
-                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-10))
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 500, 1e-10))
     return K, D, ret, rvecs, tvecs, objpoints, imgpoints
 
 
@@ -148,7 +149,12 @@ def undistort(selected, K, D, out_dir):
 
 
 def save_intrinsic(K, D, img_size, file='intrinsic.json'):
-    data = {"K": K.tolist(), "dist": D.tolist(), "img_size": [img_size[0], img_size[1]]}
+    # 获取文件的父目录路径
+    dir_path = os.path.dirname(file)
+    # 如果父目录路径不存在，则创建它
+    if dir_path and not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+    data = {"K": K.tolist(), "dist": D[0].tolist(), "img_size": [img_size[0], img_size[1]]}
     with open(file, 'w') as f:
         json.dump(data, f, indent=2)
     print(f"内参已保存到 {file}")
@@ -311,12 +317,12 @@ def main():
     print(f"📏 重投影误差(RMS): {err:.4f} 像素")
     save_selected(selected, f'{args.img_dir}/selected')
     undistort(selected, K, D, f'{args.img_dir}/undistorted')
-    save_intrinsic(K, D, img_size, f'{args.img_dir}/intrinsic.json')
+    save_intrinsic(K, D, img_size, f'{args.out_dir}/intrinsic.json')
 
     if args.pdf_report:
         errors = compute_reprojection_errors(objp, imgp, rvecs, tvecs, K, D)
         generate_pdf_report(K, D, img_size, selected, errors, rvecs, tvecs, objp, imgp,
-                            path=f'{args.img_dir}/calibration_report.pdf')
+                            path=f'{args.out_dir}/calibration_report.pdf')
 
 
 if __name__ == '__main__':

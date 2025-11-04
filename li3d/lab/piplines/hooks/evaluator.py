@@ -9,10 +9,10 @@ import numpy as np
 import wandb
 import torch
 import torch.distributed as dist
-from uuid import uuid4
 
 from ...utils import comm
 from ...utils.misc import intersection_and_union_gpu
+from ...utils.misc import quat_to_matrix
 
 from .default import HookBase
 from .builder import HOOKS
@@ -241,393 +241,305 @@ class SemSegEvaluator(HookBase):
             "Best {}: {:.4f}".format("mIoU", self.trainer.best_metric_value)
         )
 
+def get_rotation_translation_from_transform(transform):
+    r"""Decompose transformation matrix into rotation matrix and translation vector.
+
+    Args:
+        transform (Tensor): (*, 4, 4)
+
+    Returns:
+        rotation (Tensor): (*, 3, 3)
+        translation (Tensor): (*, 3)
+    """
+    rotation = transform[..., :3, :3]
+    translation = transform[..., :3, 3]
+    return rotation, translation
+
+def relative_rotation_error(gt_rotations, rotations):
+    r"""Isotropic Relative Rotation Error.
+
+    RRE = acos((trace(R^T \cdot \bar{R}) - 1) / 2)
+
+    Args:
+        gt_rotations (Tensor): ground truth rotation matrix (*, 3, 3)
+        rotations (Tensor): estimated rotation matrix (*, 3, 3)
+
+    Returns:
+        rre (Tensor): relative rotation errors (*)
+    """
+    mat = torch.matmul(rotations.transpose(-1, -2), gt_rotations)
+    trace = mat[..., 0, 0] + mat[..., 1, 1] + mat[..., 2, 2]
+    x = 0.5 * (trace - 1.0)
+    x = x.clamp(min=-1.0, max=1.0)
+    x = torch.arccos(x)
+    rre = 180.0 * x / np.pi
+    return rre
+
+def relative_translation_error(gt_translations, translations):
+    r"""Isotropic Relative Rotation Error.
+
+    RTE = \lVert t - \bar{t} \rVert_2
+
+    Args:
+        gt_translations (Tensor): ground truth translation vector (*, 3)
+        translations (Tensor): estimated translation vector (*, 3)
+
+    Returns:
+        rre (Tensor): relative rotation errors (*)
+    """
+    rte = torch.linalg.norm(gt_translations - translations, dim=-1)
+    return rte
+
+def isotropic_transform_error(gt_transforms, transforms, reduction='mean'):
+    r"""Compute the isotropic Relative Rotation Error and Relative Translation Error.
+
+    Args:
+        gt_transforms (Tensor): ground truth transformation matrix (*, 4, 4)
+        transforms (Tensor): estimated transformation matrix (*, 4, 4)
+        reduction (str='mean'): reduction method, 'mean', 'sum' or 'none'
+
+    Returns:
+        rre (Tensor): relative rotation error.
+        rte (Tensor): relative translation error.
+    """
+    assert reduction in ['mean', 'sum', 'none']
+
+    gt_rotations, gt_translations = get_rotation_translation_from_transform(gt_transforms)
+    rotations, translations = get_rotation_translation_from_transform(transforms)
+
+    rre = relative_rotation_error(gt_rotations, rotations)  # (*)
+    rte = relative_translation_error(gt_translations, translations)  # (*)
+
+    if reduction == 'mean':
+        rre = rre.mean()
+        rte = rte.mean()
+    elif reduction == 'sum':
+        rre = rre.sum()
+        rte = rte.sum()
+
+    return rre, rte
+
+def apply_transform(points, transform, normals=None):
+    r"""Rigid transform to points and normals (optional).
+
+    Given a point cloud P(3, N), normals V(3, N) and a transform matrix T in the form of
+      | R t |
+      | 0 1 |,
+    the output point cloud Q = RP + t, V' = RV.
+
+    In the implementation, P and V are (N, 3), so R should be transposed: Q = PR^T + t, V' = VR^T.
+
+    There are two cases supported:
+    1. points and normals are (*, 3), transform is (4, 4), the output points are (*, 3).
+       In this case, the transform is applied to all points.
+    2. points and normals are (B, N, 3), transform is (B, 4, 4), the output points are (B, N, 3).
+       In this case, the transform is applied batch-wise. The points can be broadcast if B=1.
+
+    Args:
+        points (Tensor): (*, 3) or (B, N, 3)
+        normals (optional[Tensor]=None): same shape as points.
+        transform (Tensor): (4, 4) or (B, 4, 4)
+
+    Returns:
+        points (Tensor): same shape as points.
+        normals (Tensor): same shape as points.
+    """
+    if normals is not None:
+        assert points.shape == normals.shape
+    if transform.ndim == 2:
+        rotation = transform[:3, :3]
+        translation = transform[:3, 3]
+        points_shape = points.shape
+        points = points.reshape(-1, 3)
+        points = torch.matmul(points, rotation.transpose(-1, -2)) + translation
+        points = points.reshape(*points_shape)
+        if normals is not None:
+            normals = normals.reshape(-1, 3)
+            normals = torch.matmul(normals, rotation.transpose(-1, -2))
+            normals = normals.reshape(*points_shape)
+    elif transform.ndim == 3 and points.ndim == 3:
+        rotation = transform[:, :3, :3]  # (B, 3, 3)
+        translation = transform[:, None, :3, 3]  # (B, 1, 3)
+        points = torch.matmul(points, rotation.transpose(-1, -2)) + translation
+        if normals is not None:
+            normals = torch.matmul(normals, rotation.transpose(-1, -2))
+    else:
+        raise ValueError(
+            'Incompatible shapes between points {} and transform {}.'.format(
+                tuple(points.shape), tuple(transform.shape)
+            )
+        )
+    if normals is not None:
+        return points, normals
+    else:
+        return points
+
+
+class Evaluator:
+    def __init__(self, acceptance_overlap, acceptance_radius, acceptance_rre, acceptance_rte):
+        super(Evaluator, self).__init__()
+        self.acceptance_overlap = acceptance_overlap
+        self.acceptance_radius = acceptance_radius
+        self.acceptance_rre = acceptance_rre
+        self.acceptance_rte = acceptance_rte
+
+    @torch.no_grad()
+    def evaluate_coarse(self, pred, target):
+        ref_length_c = pred['ref_points_c'].shape[0]
+        src_length_c = pred['src_points_c'].shape[0]
+        gt_node_corr_overlaps = target['gt_node_corr_overlaps']
+        gt_node_corr_indices = target['gt_node_corr_indices']
+        masks = torch.gt(gt_node_corr_overlaps, self.acceptance_overlap)
+        gt_node_corr_indices = gt_node_corr_indices[masks]
+        gt_ref_node_corr_indices = gt_node_corr_indices[:, 0]
+        gt_src_node_corr_indices = gt_node_corr_indices[:, 1]
+        gt_node_corr_map = torch.zeros(ref_length_c, src_length_c).cuda()
+        gt_node_corr_map[gt_ref_node_corr_indices, gt_src_node_corr_indices] = 1.0
+
+        ref_node_corr_indices = pred['ref_node_corr_indices']
+        src_node_corr_indices = pred['src_node_corr_indices']
+
+        precision = gt_node_corr_map[ref_node_corr_indices, src_node_corr_indices].mean()
+
+        return precision
+
+    @torch.no_grad()
+    def evaluate_fine(self, pred, target):
+        transform = target['transform']
+        ref_corr_points = pred['ref_corr_points']
+        src_corr_points = pred['src_corr_points']
+        src_corr_points = apply_transform(src_corr_points, transform)
+        corr_distances = torch.linalg.norm(ref_corr_points - src_corr_points, dim=1)
+        precision = torch.lt(corr_distances, self.acceptance_radius).float().mean()
+        return precision
+
+    @torch.no_grad()
+    def evaluate_registration(self, pred, target):
+        transform = target['transform']
+        est_transform = pred['estimated_transform']
+        src_points = pred['src_points']
+
+        rre, rte = isotropic_transform_error(transform, est_transform)
+        recall = torch.logical_and(torch.lt(rre, self.acceptance_rre), torch.lt(rte, self.acceptance_rte)).float()
+
+        gt_src_points = apply_transform(src_points, transform)
+        est_src_points = apply_transform(src_points, est_transform)
+        rmse = torch.linalg.norm(est_src_points - gt_src_points, dim=1).mean()
+
+        return rre, rte, rmse, recall
+
 
 @HOOKS.register_module()
-class InsSegEvaluator(HookBase):
-    def __init__(self, segment_ignore_index=(-1,), instance_ignore_index=-1):
-        self.segment_ignore_index = segment_ignore_index
-        self.instance_ignore_index = instance_ignore_index
-
-        self.valid_class_names = None  # update in before train
-        self.overlaps = np.append(np.arange(0.5, 0.95, 0.05), 0.25)
-        self.min_region_sizes = 100
-        self.distance_threshes = float("inf")
-        self.distance_confs = -float("inf")
+class PointCloudRegistrationEvaluator(HookBase):
+    def __init__(self,
+                 acceptance_overlap,
+                 acceptance_radius,
+                 acceptance_rre,
+                 acceptance_rte,
+                 write_metrics=False):
+        self.acceptance_overlap = acceptance_overlap
+        self.acceptance_radius = acceptance_radius
+        self.acceptance_rre = acceptance_rre
+        self.acceptance_rte = acceptance_rte
 
     def before_train(self):
-        self.valid_class_names = [
-            self.trainer.cfg.data.names[i]
-            for i in range(self.trainer.cfg.data.num_classes)
-            if i not in self.segment_ignore_index
-        ]
+        if self.trainer.writer is not None and self.trainer.cfg.enable_wandb:
+            wandb.define_metric("val/*", step_metric="Epoch")
 
     def after_epoch(self):
         if self.trainer.cfg.evaluate:
             self.eval()
 
-    def associate_instances(self, pred, segment, instance):
-        segment = segment.cpu().numpy()
-        instance = instance.cpu().numpy()
-        void_mask = np.in1d(segment, self.segment_ignore_index)
-
-        assert (
-            pred["pred_classes"].shape[0]
-            == pred["pred_scores"].shape[0]
-            == pred["pred_masks"].shape[0]
-        )
-        assert pred["pred_masks"].shape[1] == segment.shape[0] == instance.shape[0]
-        # get gt instances
-        gt_instances = dict()
-        for i in range(self.trainer.cfg.data.num_classes):
-            if i not in self.segment_ignore_index:
-                gt_instances[self.trainer.cfg.data.names[i]] = []
-        instance_ids, idx, counts = np.unique(
-            instance, return_index=True, return_counts=True
-        )
-        segment_ids = segment[idx]
-        for i in range(len(instance_ids)):
-            if instance_ids[i] == self.instance_ignore_index:
-                continue
-            if segment_ids[i] in self.segment_ignore_index:
-                continue
-            gt_inst = dict()
-            gt_inst["instance_id"] = instance_ids[i]
-            gt_inst["segment_id"] = segment_ids[i]
-            gt_inst["dist_conf"] = 0.0
-            gt_inst["med_dist"] = -1.0
-            gt_inst["vert_count"] = counts[i]
-            gt_inst["matched_pred"] = []
-            gt_instances[self.trainer.cfg.data.names[segment_ids[i]]].append(gt_inst)
-
-        # get pred instances and associate with gt
-        pred_instances = dict()
-        for i in range(self.trainer.cfg.data.num_classes):
-            if i not in self.segment_ignore_index:
-                pred_instances[self.trainer.cfg.data.names[i]] = []
-        instance_id = 0
-        for i in range(len(pred["pred_classes"])):
-            if pred["pred_classes"][i] in self.segment_ignore_index:
-                continue
-            pred_inst = dict()
-            pred_inst["uuid"] = uuid4()
-            pred_inst["instance_id"] = instance_id
-            pred_inst["segment_id"] = pred["pred_classes"][i]
-            pred_inst["confidence"] = pred["pred_scores"][i]
-            pred_inst["mask"] = np.not_equal(pred["pred_masks"][i], 0)
-            pred_inst["vert_count"] = np.count_nonzero(pred_inst["mask"])
-            pred_inst["void_intersection"] = np.count_nonzero(
-                np.logical_and(void_mask, pred_inst["mask"])
-            )
-            if pred_inst["vert_count"] < self.min_region_sizes:
-                continue  # skip if empty
-            segment_name = self.trainer.cfg.data.names[pred_inst["segment_id"]]
-            matched_gt = []
-            for gt_idx, gt_inst in enumerate(gt_instances[segment_name]):
-                intersection = np.count_nonzero(
-                    np.logical_and(
-                        instance == gt_inst["instance_id"], pred_inst["mask"]
-                    )
-                )
-                if intersection > 0:
-                    gt_inst_ = gt_inst.copy()
-                    pred_inst_ = pred_inst.copy()
-                    gt_inst_["intersection"] = intersection
-                    pred_inst_["intersection"] = intersection
-                    matched_gt.append(gt_inst_)
-                    gt_inst["matched_pred"].append(pred_inst_)
-            pred_inst["matched_gt"] = matched_gt
-            pred_instances[segment_name].append(pred_inst)
-            instance_id += 1
-        return gt_instances, pred_instances
-
-    def evaluate_matches(self, scenes):
-        overlaps = self.overlaps
-        min_region_sizes = [self.min_region_sizes]
-        dist_threshes = [self.distance_threshes]
-        dist_confs = [self.distance_confs]
-
-        # results: class x overlap
-        ap_table = np.zeros(
-            (len(dist_threshes), len(self.valid_class_names), len(overlaps)), float
-        )
-        for di, (min_region_size, distance_thresh, distance_conf) in enumerate(
-            zip(min_region_sizes, dist_threshes, dist_confs)
-        ):
-            for oi, overlap_th in enumerate(overlaps):
-                pred_visited = {}
-                for scene in scenes:
-                    for _ in scene["pred"]:
-                        for label_name in self.valid_class_names:
-                            for p in scene["pred"][label_name]:
-                                if "uuid" in p:
-                                    pred_visited[p["uuid"]] = False
-                for li, label_name in enumerate(self.valid_class_names):
-                    y_true = np.empty(0)
-                    y_score = np.empty(0)
-                    hard_false_negatives = 0
-                    has_gt = False
-                    has_pred = False
-                    for scene in scenes:
-                        pred_instances = scene["pred"][label_name]
-                        gt_instances = scene["gt"][label_name]
-                        # filter groups in ground truth
-                        gt_instances = [
-                            gt
-                            for gt in gt_instances
-                            if gt["vert_count"] >= min_region_size
-                            and gt["med_dist"] <= distance_thresh
-                            and gt["dist_conf"] >= distance_conf
-                        ]
-                        if gt_instances:
-                            has_gt = True
-                        if pred_instances:
-                            has_pred = True
-
-                        cur_true = np.ones(len(gt_instances))
-                        cur_score = np.ones(len(gt_instances)) * (-float("inf"))
-                        cur_match = np.zeros(len(gt_instances), dtype=bool)
-                        # collect matches
-                        for gti, gt in enumerate(gt_instances):
-                            found_match = False
-                            for pred in gt["matched_pred"]:
-                                # greedy assignments
-                                if pred_visited[pred["uuid"]]:
-                                    continue
-                                overlap = float(pred["intersection"]) / (
-                                    gt["vert_count"]
-                                    + pred["vert_count"]
-                                    - pred["intersection"]
-                                )
-                                if overlap > overlap_th:
-                                    confidence = pred["confidence"]
-                                    # if already have a prediction for this gt,
-                                    # the prediction with the lower score is automatically a false positive
-                                    if cur_match[gti]:
-                                        max_score = max(cur_score[gti], confidence)
-                                        min_score = min(cur_score[gti], confidence)
-                                        cur_score[gti] = max_score
-                                        # append false positive
-                                        cur_true = np.append(cur_true, 0)
-                                        cur_score = np.append(cur_score, min_score)
-                                        cur_match = np.append(cur_match, True)
-                                    # otherwise set score
-                                    else:
-                                        found_match = True
-                                        cur_match[gti] = True
-                                        cur_score[gti] = confidence
-                                        pred_visited[pred["uuid"]] = True
-                            if not found_match:
-                                hard_false_negatives += 1
-                        # remove non-matched ground truth instances
-                        cur_true = cur_true[cur_match]
-                        cur_score = cur_score[cur_match]
-
-                        # collect non-matched predictions as false positive
-                        for pred in pred_instances:
-                            found_gt = False
-                            for gt in pred["matched_gt"]:
-                                overlap = float(gt["intersection"]) / (
-                                    gt["vert_count"]
-                                    + pred["vert_count"]
-                                    - gt["intersection"]
-                                )
-                                if overlap > overlap_th:
-                                    found_gt = True
-                                    break
-                            if not found_gt:
-                                num_ignore = pred["void_intersection"]
-                                for gt in pred["matched_gt"]:
-                                    if gt["segment_id"] in self.segment_ignore_index:
-                                        num_ignore += gt["intersection"]
-                                    # small ground truth instances
-                                    if (
-                                        gt["vert_count"] < min_region_size
-                                        or gt["med_dist"] > distance_thresh
-                                        or gt["dist_conf"] < distance_conf
-                                    ):
-                                        num_ignore += gt["intersection"]
-                                proportion_ignore = (
-                                    float(num_ignore) / pred["vert_count"]
-                                )
-                                # if not ignored append false positive
-                                if proportion_ignore <= overlap_th:
-                                    cur_true = np.append(cur_true, 0)
-                                    confidence = pred["confidence"]
-                                    cur_score = np.append(cur_score, confidence)
-
-                        # append to overall results
-                        y_true = np.append(y_true, cur_true)
-                        y_score = np.append(y_score, cur_score)
-
-                    # compute average precision
-                    if has_gt and has_pred:
-                        # compute precision recall curve first
-
-                        # sorting and cumsum
-                        score_arg_sort = np.argsort(y_score)
-                        y_score_sorted = y_score[score_arg_sort]
-                        y_true_sorted = y_true[score_arg_sort]
-                        y_true_sorted_cumsum = np.cumsum(y_true_sorted)
-
-                        # unique thresholds
-                        (thresholds, unique_indices) = np.unique(
-                            y_score_sorted, return_index=True
-                        )
-                        num_prec_recall = len(unique_indices) + 1
-
-                        # prepare precision recall
-                        num_examples = len(y_score_sorted)
-                        # https://github.com/ScanNet/ScanNet/pull/26
-                        # all predictions are non-matched but also all of them are ignored and not counted as FP
-                        # y_true_sorted_cumsum is empty
-                        # num_true_examples = y_true_sorted_cumsum[-1]
-                        num_true_examples = (
-                            y_true_sorted_cumsum[-1]
-                            if len(y_true_sorted_cumsum) > 0
-                            else 0
-                        )
-                        precision = np.zeros(num_prec_recall)
-                        recall = np.zeros(num_prec_recall)
-
-                        # deal with the first point
-                        y_true_sorted_cumsum = np.append(y_true_sorted_cumsum, 0)
-                        # deal with remaining
-                        for idx_res, idx_scores in enumerate(unique_indices):
-                            cumsum = y_true_sorted_cumsum[idx_scores - 1]
-                            tp = num_true_examples - cumsum
-                            fp = num_examples - idx_scores - tp
-                            fn = cumsum + hard_false_negatives
-                            p = float(tp) / (tp + fp)
-                            r = float(tp) / (tp + fn)
-                            precision[idx_res] = p
-                            recall[idx_res] = r
-
-                        # first point in curve is artificial
-                        precision[-1] = 1.0
-                        recall[-1] = 0.0
-
-                        # compute average of precision-recall curve
-                        recall_for_conv = np.copy(recall)
-                        recall_for_conv = np.append(recall_for_conv[0], recall_for_conv)
-                        recall_for_conv = np.append(recall_for_conv, 0.0)
-
-                        stepWidths = np.convolve(
-                            recall_for_conv, [-0.5, 0, 0.5], "valid"
-                        )
-                        # integrate is now simply a dot product
-                        ap_current = np.dot(precision, stepWidths)
-
-                    elif has_gt:
-                        ap_current = 0.0
-                    else:
-                        ap_current = float("nan")
-                    ap_table[di, li, oi] = ap_current
-        d_inf = 0
-        o50 = np.where(np.isclose(self.overlaps, 0.5))
-        o25 = np.where(np.isclose(self.overlaps, 0.25))
-        oAllBut25 = np.where(np.logical_not(np.isclose(self.overlaps, 0.25)))
-        ap_scores = dict()
-        ap_scores["all_ap"] = np.nanmean(ap_table[d_inf, :, oAllBut25])
-        ap_scores["all_ap_50%"] = np.nanmean(ap_table[d_inf, :, o50])
-        ap_scores["all_ap_25%"] = np.nanmean(ap_table[d_inf, :, o25])
-        ap_scores["classes"] = {}
-        for li, label_name in enumerate(self.valid_class_names):
-            ap_scores["classes"][label_name] = {}
-            ap_scores["classes"][label_name]["ap"] = np.average(
-                ap_table[d_inf, li, oAllBut25]
-            )
-            ap_scores["classes"][label_name]["ap50%"] = np.average(
-                ap_table[d_inf, li, o50]
-            )
-            ap_scores["classes"][label_name]["ap25%"] = np.average(
-                ap_table[d_inf, li, o25]
-            )
-        return ap_scores
-
+    # ---------- 核心评估 ----------
     def eval(self):
         self.trainer.logger.info(">>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>")
         self.trainer.model.eval()
-        scenes = []
+
+        total_c_precision = 0.0
+        total_f_precision = 0.0
+        total_rre = 0.0
+        total_rte = 0.0
+        total_rmse = 0.0
+        total_recall = 0.0
+        num_batches = 0
+
         for i, input_dict in enumerate(self.trainer.val_loader):
-            assert (
-                len(input_dict["offset"]) == 1
-            )  # currently only support bs 1 for each GPU
-            for key in input_dict.keys():
-                if isinstance(input_dict[key], torch.Tensor):
-                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.cuda(non_blocking=True)
+
             with torch.no_grad():
                 output_dict = self.trainer.model(input_dict)
 
-            loss = output_dict["loss"]
+                pred = output_dict["pred"]
+                target = output_dict["target"]
+                registration_evaluator = Evaluator(acceptance_overlap=self.acceptance_overlap,
+                                                   acceptance_radius=self.acceptance_radius,
+                                                   acceptance_rre=self.acceptance_rre,
+                                                   acceptance_rte=self.acceptance_rte)
+                c_precision = registration_evaluator.evaluate_coarse(pred, target)
+                f_precision = registration_evaluator.evaluate_fine(pred, target)
+                rre, rte, rmse, recall = registration_evaluator.evaluate_registration(pred, target)
 
-            segment = input_dict["segment"]
-            instance = input_dict["instance"]
-            # map to origin
-            if "origin_coord" in input_dict.keys():
-                idx, _ = pointops.knn_query(
-                    1,
-                    input_dict["coord"].float(),
-                    input_dict["offset"].int(),
-                    input_dict["origin_coord"].float(),
-                    input_dict["origin_offset"].int(),
-                )
-                idx = idx.cpu().flatten().long()
-                output_dict["pred_masks"] = output_dict["pred_masks"][:, idx]
-                segment = input_dict["origin_segment"]
-                instance = input_dict["origin_instance"]
+            total_c_precision += c_precision
+            total_f_precision += f_precision
+            total_rre += rre
+            total_rte += rte
+            total_rmse += rmse
+            total_recall += recall
+            num_batches += 1
 
-            gt_instances, pred_instance = self.associate_instances(
-                output_dict, segment, instance
-            )
-            scenes.append(dict(gt=gt_instances, pred=pred_instance))
+        # ----------- 日志 & 记录 -----------
+        avg_c_precision   = total_c_precision / num_batches
+        avg_f_precision = total_f_precision / num_batches
+        avg_rre = total_rre / num_batches
+        avg_rte = total_rte / num_batches
+        avg_rmse = total_rmse / num_batches
+        avg_recall = total_recall / num_batches
 
-            self.trainer.storage.put_scalar("val_loss", loss.item())
-            self.trainer.logger.info(
-                "Test: [{iter}/{max_iter}] "
-                "Loss {loss:.4f} ".format(
-                    iter=i + 1, max_iter=len(self.trainer.val_loader), loss=loss.item()
-                )
-            )
-
-        loss_avg = self.trainer.storage.history("val_loss").avg
-        comm.synchronize()
-        scenes_sync = comm.gather(scenes, dst=0)
-        scenes = [scene for scenes_ in scenes_sync for scene in scenes_]
-        ap_scores = self.evaluate_matches(scenes)
-        all_ap = ap_scores["all_ap"]
-        all_ap_50 = ap_scores["all_ap_50%"]
-        all_ap_25 = ap_scores["all_ap_25%"]
         self.trainer.logger.info(
-            "Val result: mAP/AP50/AP25 {:.4f}/{:.4f}/{:.4f}.".format(
-                all_ap, all_ap_50, all_ap_25
-            )
+            "Val result: PIR %.4f°, IR %.4f, RRE %.4f, RTE %.4f, RMSE %.4f, RR %.4f",
+            (avg_c_precision, avg_f_precision, avg_rre, avg_rte, avg_rmse, avg_recall)
         )
-        for i, label_name in enumerate(self.valid_class_names):
-            ap = ap_scores["classes"][label_name]["ap"]
-            ap_50 = ap_scores["classes"][label_name]["ap50%"]
-            ap_25 = ap_scores["classes"][label_name]["ap25%"]
-            self.trainer.logger.info(
-                "Class_{idx}-{name} Result: AP/AP50/AP25 {AP:.4f}/{AP50:.4f}/{AP25:.4f}".format(
-                    idx=i, name=label_name, AP=ap, AP50=ap_50, AP25=ap_25
-                )
-            )
-        current_epoch = self.trainer.epoch + 1
+
+        cur_epoch = self.trainer.epoch + 1
         if self.trainer.writer is not None:
-            self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
-            self.trainer.writer.add_scalar("val/mAP", all_ap, current_epoch)
-            self.trainer.writer.add_scalar("val/AP50", all_ap_50, current_epoch)
-            self.trainer.writer.add_scalar("val/AP25", all_ap_25, current_epoch)
+            self.trainer.writer.add_scalar("val/PIR", avg_c_precision, cur_epoch)
+            self.trainer.writer.add_scalar("val/IR", avg_f_precision, cur_epoch)
+            self.trainer.writer.add_scalar("val/RRE", avg_rre, cur_epoch)
+            self.trainer.writer.add_scalar("val/RTE", avg_rte, cur_epoch)
+            self.trainer.writer.add_scalar("val/RMSE", avg_rmse, cur_epoch)
+            self.trainer.writer.add_scalar("val/RR", avg_recall, cur_epoch)
             if self.trainer.cfg.enable_wandb:
-                wandb.log(
-                    {
-                        "Epoch": current_epoch,
-                        "val/loss": loss_avg,
-                        "val/mAP": all_ap,
-                        "val/AP50": all_ap_50,
-                        "val/AP25": all_ap_25,
-                    },
-                    step=wandb.run.step,
-                )
+                wandb.log({
+                    "Epoch": cur_epoch,
+                    "val/PIR": avg_c_precision,
+                    "val/IR": avg_f_precision,
+                    "val/RRE": avg_rre,
+                    "val/RTE": avg_rte,
+                    "val/RMSE": avg_rmse,
+                    "val/RR": avg_recall,
+                }, step=wandb.run.step)
+
         self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
-        self.trainer.comm_info["current_metric_value"] = all_ap_50  # save for saver
-        self.trainer.comm_info["current_metric_name"] = "AP50"  # save for saver
+
+    # ---------------- 工具函数 ----------------
+    @staticmethod
+    def quaternion_angle(q1, q2):
+        """q1,q2: [B,4] 已归一化 -> [B] 弧度"""
+        dot = (q1 * q2).sum(dim=-1).clamp(-1, 1)
+        dot = torch.abs(dot)          # 处理 q/-q
+        return 2 * torch.acos(dot)
+
+    def apply_transform(self, source, transform):
+        ones = torch.ones((source.shape[0], 1), device=source.device)
+        source_h = torch.cat([source, ones], dim=1)
+        return (source_h @ transform.T)[:, :3]
+
+    def calculate_chamfer_distance(self, src, tgt):
+        dist1 = torch.cdist(src, tgt).min(dim=1)[0].mean()
+        dist2 = torch.cdist(tgt, src).min(dim=1)[0].mean()
+        return (dist1 + dist2) / 2
+
+    def after_train(self):
+        self.trainer.logger.info("Best Chamfer Distance: %.4f" % self.trainer.best_metric_value)

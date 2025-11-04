@@ -8,7 +8,7 @@ def load_intrinsic(json_path):
     with open(json_path, 'r') as f:
         cfg = json.load(f)
     K = np.array(cfg['K'], dtype=np.float64)
-    D = np.array(cfg['dist'][0], dtype=np.float64)   # 5 系数
+    D = np.array(cfg['dist'], dtype=np.float64)   # 5 系数
     h = int(cfg['img_size'][1])        # 高
     w = int(cfg['img_size'][0])        # 宽
     return K, D, h, w
@@ -28,11 +28,11 @@ def img_undistort(img_bgr, K=None, D=None, cfg_height=None, cfg_width=None, alph
     return img_bgr
 
 if __name__ == '__main__':
-    json_path = r'D:\program\SuperGluePretrainedNetwork\camera_intrinsic\data\qiaolin_thermal\intrinsic.json'
-    img_path = r'D:\program\SuperGluePretrainedNetwork\camera_intrinsic\data\qiaolin_thermal\frame_0000.jpg'
+    json_path = r'D:\program\li3D-ML\data\JaXing\intrinsic(2)(1).json'
+    img_path = r'D:\program\li3D-ML\data\calib\camera_intrinsic\data\jiaxing_complete\frame_0.jpg'
     img_bgr = cv2.imread(img_path)
     K, D, h, w = load_intrinsic(json_path)
-    img_bgr = img_undistort(img_bgr, K, D, h, w, alpha=1)
+    img_bgr = img_undistort(img_bgr, K, D, h, w, alpha=0.1)
     save_path = os.path.splitext(img_path)[0] + '_undistort.png'
     cv2.imwrite(save_path, img_bgr)
     print('saved:', save_path)

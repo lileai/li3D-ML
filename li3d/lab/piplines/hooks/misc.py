@@ -280,7 +280,7 @@ class PreciseEvaluator(HookBase):
         self.test_last = test_last
 
     def after_train(self):
-        from pointcept.engines.test import TESTERS
+        from ..test import TESTERS
 
         self.trainer.logger.info(
             ">>>>>>>>>>>>>>>> Start Precise Evaluation >>>>>>>>>>>>>>>>"

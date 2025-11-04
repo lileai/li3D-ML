@@ -63,7 +63,7 @@ class CustomerDataset(DefaultDataset):
 
         # ---- 2. 随机齐次变换（旋转 + 平移） ----
         R = Rotation.random().as_matrix()  # 3×3 随机旋转
-        t = np.random.uniform(-0.5, 0.5, size=3)  # 随机平移
+        t = np.random.uniform(-2, 2, size=3)  # 随机平移
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = t  # 4×4 齐次矩阵

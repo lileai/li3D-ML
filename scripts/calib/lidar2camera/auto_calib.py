@@ -43,10 +43,14 @@ def draw_frame(img, orig_2d, axes_2d, len_px=60, thickness=2):
     colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
     for ax2d, c in zip(axes_2d, colors):
         end = orig_2d + len_px * ax2d
-        cv2.arrowedLine(img,
-                        tuple(orig_2d.astype(int)),
-                        tuple(end.astype(int)),
-                        color=c, thickness=thickness, tipLength=0.2)
+        pt1 = tuple(orig_2d.astype(np.int32))  # 确保起点是整数
+        pt2 = tuple(end.astype(np.int32))  # 确保终点是整数
+
+        # 检查坐标是否在图像范围内
+        if (0 <= pt1[0] < img.shape[1] and 0 <= pt1[1] < img.shape[0] and
+            0 <= pt2[0] < img.shape[1] and 0 <= pt2[1] < img.shape[0]):
+            cv2.arrowedLine(img, pt1, pt2, color=c, thickness=thickness, tipLength=0.2)
+
 
 def load_extrinsic(path):
     with open(path) as f:
@@ -79,12 +83,12 @@ def project(points, K_orig, dist_coeffs, T_l2c, mode='intensity', intensity=None
     pts_cam = pts_cam[depth_mask]
     if intensity is not None:
         intensity = intensity[depth_mask]
-    # pts2d, _ = cv2.projectPoints(pts_cam,
-    #                              np.zeros(3), np.zeros(3),
-    #                              K_orig, dist_coeffs)
     pts2d, _ = cv2.projectPoints(pts_cam,
                                  np.zeros(3), np.zeros(3),
-                                 K_orig, np.zeros_like(dist_coeffs))
+                                 K_orig, dist_coeffs)
+    # pts2d, _ = cv2.projectPoints(pts_cam,
+    #                              np.zeros(3), np.zeros(3),
+    #                              K_orig, np.zeros_like(dist_coeffs))
     pts2d = pts2d.reshape(-1, 2)
     mask = (pts2d[:, 0] >= 0) & (pts2d[:, 0] < w0) & \
            (pts2d[:, 1] >= 0) & (pts2d[:, 1] < h0)
@@ -165,11 +169,11 @@ def read_pcd_points(pcd_name):
 # ---------- 主 ----------
 def main():
     global raw_img, pts, intensity, T_ext, K, dist, color_mode, w0, h0, zoom, alpha, pick_mode, pts_2d, pts_3d, last_action
-    dirs = r"../../../data/calib/lidar2camera/data/qingshan"
+    dirs = r"../../../data/calib/lidar2camera/data/jiaxing_capture"
     parser = argparse.ArgumentParser()
     parser.add_argument('--prj_dir', default=dirs)
-    parser.add_argument("--img",  default=r"D:\program\li3D-ML\scripts\calib\lidar2camera\data\qingshan\frame_01068.jpg")
-    parser.add_argument("--pcd",  default=r"D:\program\li3D-ML\scripts\calib\lidar2camera\data\qingshan\rename_2025_05_29_10_08_31_000.pcd")
+    parser.add_argument("--img",  default=r"D:\program\li3D-ML\data\calib\lidar2camera\data\jiaxing_capture\mapping_img\mapping_2025_11_04_12_04_55_863299_img.jpg")
+    parser.add_argument("--pcd",  default=r"D:\program\li3D-ML\data\calib\lidar2camera\data\jiaxing_capture\.pcd\1762229095.8632991_MERGE.pcd")
     parser.add_argument("--intr", default=fr"{dirs}/intrinsic.json")
     parser.add_argument("--extr", default=fr"{dirs}/extrinsic.json")
     args = parser.parse_args()
@@ -195,9 +199,9 @@ def main():
     cv2.setMouseCallback("lidar2camera", mouse_click)
 
     cv2.createTrackbar("deg_step(x100)", "lidar2camera", 30, 500, lambda x: None)
-    cv2.createTrackbar("trans_step(cm)", "lidar2camera", 6, 200, lambda x: None)
+    cv2.createTrackbar("trans_step(cm)", "lidar2camera", 1000, 1000, lambda x: None)
     cv2.createTrackbar("zoom(%)", "lidar2camera", 100, 400, lambda x: None)
-    cv2.createTrackbar("point_size", "lidar2camera", 1, 5, lambda x: None)
+    cv2.createTrackbar("point_size", "lidar2camera", 1, 20, lambda x: None)
     cv2.createTrackbar("toggle_mode", "lidar2camera", 0, 1, lambda x: None)
     cv2.createTrackbar("alpha", "lidar2camera", int(alpha * 100), 100, lambda x: None)
 

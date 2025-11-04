@@ -2,4 +2,6 @@ from .builder import build_model
 from .default import DefaultSegmentor
 
 """Networks for torch."""
-from .base_model import *
+from .backbone import *
+from .neck import *
+from .head import *

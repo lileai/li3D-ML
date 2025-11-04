@@ -5,7 +5,6 @@ try:
     import ocnn
 except ImportError:
     ocnn = None
-from addict import Dict
 from typing import List
 
 from .serialization import encode
@@ -16,8 +15,53 @@ from . import (
     bincount2offset,
 )
 
+class ConfigDict(dict):
+    """
+    纯标准库实现的「属性友好」字典，行为与 addict.Dict 保持一致：
+    1. 支持 cfg.a.b.c 链式属性访问
+    2. 缺失键抛 AttributeError（而非自动创建）
+    3. 赋值时自动把嵌套 dict 递归转成 ConfigDict
+    4. 无循环自引用，可被 pickle / multiprocessing 安全序列化
+    """
 
-class Point(Dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 初始化时把嵌套 dict 一次性转成 ConfigDict，保证后续链式访问
+        for k, v in list(self.items()):
+            if isinstance(v, dict):
+                self[k] = ConfigDict(v)
+
+    # ---------- 读属性 ----------
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(
+                f"'{self.__class__.__name__}' object has no attribute '{name}'"
+            ) from None
+
+    # ---------- 写属性 ----------
+    def __setattr__(self, name, value):
+        # 如果赋的是 dict，继续递归包成 ConfigDict，保持类型一致性
+        if isinstance(value, dict):
+            value = ConfigDict(value)
+        self[name] = value
+
+    # ---------- 缺失键抛 KeyError（与原来一致） ----------
+    def __missing__(self, key):
+        raise KeyError(key)
+
+    # ---------- 以下两个魔术方法显式声明状态，彻底避免循环引用 ----------
+    def __getstate__(self):
+        # 只导出纯字典数据，不含自引用
+        return dict(self)
+
+    def __setstate__(self, state):
+        # 反序列化后把数据写回，同样递归转换嵌套 dict
+        self.clear()
+        self.update(ConfigDict(state))      # 用构造器保证嵌套一致性
+
+class Point(ConfigDict):
     """
     Point Structure of Pointcept
 
